@@ -1,176 +1,446 @@
-// Builds the "THE WORLD TODAY" front page for 22 November 2026 and
-// screenshots it to entry.png with the headless Chromium shell.
-// Reads stories.json, writes a static HTML page, screenshots it.
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { homedir } from "node:os";
-import { join } from "node:path";
+// The World Today — 22 November 2026.
+// Draws the day's world news as a 1024x1024 newspaper front page and writes
+// it to entry.png. Pure Node.js standard library: no npm packages, no browser,
+// no external art. Text is set with a small built-in 5x7 bitmap font and the
+// PNG file is encoded by hand (zlib deflate + CRC32 chunks), so every run
+// produces exactly the same bytes.
 
-const ROOT = new URL(".", import.meta.url).pathname;
-const data = JSON.parse(readFileSync(join(ROOT, "stories.json"), "utf8"));
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import { fileURLToPath } from 'node:url';
 
-const esc = (s) =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const WIDTH = 1024;
+const HEIGHT = 1024;
 
-// --- tiny original SVG icons (24x24) -------------------------------------
-function iconSvg(kind) {
-  const wrap = (inner) =>
-    `<svg width="34" height="34" viewBox="0 0 24 24" fill="none" aria-hidden="true">${inner}</svg>`;
-  switch (kind) {
-    case "leaf":
-      return wrap(
-        `<path d="M5 19C5 9 11 4 20 4c0 9-5 15-15 15Z" fill="#1d3557"/>` +
-          `<path d="M5 19C9 13 13 9 18 6" stroke="#f6f1e5" stroke-width="1.4"/>`
-      );
-    case "anchor":
-      return wrap(
-        `<circle cx="12" cy="5" r="2.4" stroke="#1d3557" stroke-width="1.8"/>` +
-          `<path d="M12 7.5V20M7 12h10M4 13c0 4 3.5 7 8 7s8-3 8-7" stroke="#1d3557" stroke-width="1.8" fill="none" stroke-linecap="round"/>`
-      );
-    case "shield":
-      return wrap(
-        `<path d="M12 2.5 19 5v6c0 5-3.2 8.6-7 9.5C8.2 19.6 5 16 5 11V5Z" fill="#1d3557"/>` +
-          `<path d="M12 7v9M7.5 11.5h9" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>`
-      );
-    case "flame":
-      return wrap(
-        `<path d="M12 2.5c1.5 4 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-5 .5 1.5 1.5 2.5 3 3-.5-3 0-6 0-8Z" fill="#e63946"/>` +
-          `<path d="M12 21a2.6 2.6 0 0 1-2.6-2.6c0-1.8 1.4-2.6 2.6-4.4 1.2 1.8 2.6 2.6 2.6 4.4A2.6 2.6 0 0 1 12 21Z" fill="#f4b400"/>`
-      );
-    case "bolt":
-      return wrap(
-        `<polygon points="13,2 5.5,13.5 10.5,13.5 9,22 18.5,10 13.5,10" fill="#a4161a"/>`
-      );
-    case "gamepad":
-      return wrap(
-        `<rect x="2.5" y="7" width="19" height="11" rx="5.5" fill="#1d3557"/>` +
-          `<path d="M8 10.5v5M5.5 13h5" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>` +
-          `<circle cx="15.5" cy="11.8" r="1.2" fill="#fff"/><circle cx="18" cy="14.2" r="1.2" fill="#e63946"/>`
-      );
-    default:
-      return wrap(`<circle cx="12" cy="12" r="8" fill="#1d3557"/>`);
+// ---- palette ---------------------------------------------------------------
+const PAPER = [247, 242, 230]; // warm newsprint
+const INK = [24, 24, 24]; // near-black text
+const SOFT_INK = [58, 54, 48]; // body copy
+const MUTED = [96, 90, 80]; // small print
+const RED = [176, 32, 28]; // kickers, badges, date
+const WHITE = [255, 255, 255];
+const SKY_TOP = [36, 64, 108]; // dusk sky, top of the lead art
+const SKY_LOW = [228, 146, 74]; // dusk sky, horizon
+const SUN = [238, 186, 72]; // low sun in the lead art
+const SUN_CORE = [247, 208, 110];
+const SKYLINE = [38, 36, 34]; // city silhouette
+const GROUND = [52, 48, 42];
+const GOLD = [212, 158, 46];
+const BOX_TINT = [236, 228, 210]; // stat box fill
+
+// ---- CRC32 + PNG encoding --------------------------------------------------
+const CRC_TABLE = new Uint32Array(256);
+for (let n = 0; n < 256; n += 1) {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  CRC_TABLE[n] = c >>> 0;
+}
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) {
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const out = Buffer.alloc(12 + data.length);
+  out.writeUInt32BE(data.length, 0);
+  out.write(type, 4, 'ascii');
+  data.copy(out, 8);
+  const crcInput = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  out.writeUInt32BE(crc32(crcInput), 8 + data.length);
+  return out;
+}
+
+function encodePng(width, height, rgb) {
+  const raw = Buffer.alloc(height * (1 + width * 3));
+  for (let y = 0; y < height; y += 1) {
+    raw[y * (1 + width * 3)] = 0; // filter: none
+    rgb.copy(raw, y * (1 + width * 3) + 1, y * width * 3, (y + 1) * width * 3);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type: truecolour RGB
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const idat = zlib.deflateSync(raw, { level: 9 });
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return Buffer.concat([
+    signature,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', idat),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+// ---- a tiny drawing surface -------------------------------------------------
+class Page {
+  constructor(w, h, bg) {
+    this.w = w;
+    this.h = h;
+    this.px = new Uint8Array(w * h * 3);
+    for (let i = 0; i < w * h; i += 1) {
+      this.px[i * 3] = bg[0];
+      this.px[i * 3 + 1] = bg[1];
+      this.px[i * 3 + 2] = bg[2];
+    }
+  }
+
+  set(x, y, c) {
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    const i = (y * this.w + x) * 3;
+    this.px[i] = c[0];
+    this.px[i + 1] = c[1];
+    this.px[i + 2] = c[2];
+  }
+
+  rect(x, y, w, h, c) {
+    const x0 = Math.max(0, x);
+    const y0 = Math.max(0, y);
+    const x1 = Math.min(this.w, x + w);
+    const y1 = Math.min(this.h, y + h);
+    for (let yy = y0; yy < y1; yy += 1) {
+      for (let xx = x0; xx < x1; xx += 1) this.set(xx, yy, c);
+    }
+  }
+
+  hline(x, y, w, c, t = 1) {
+    for (let k = 0; k < t; k += 1) this.rect(x, y + k, w, 1, c);
+  }
+
+  vline(x, y, h, c, t = 1) {
+    for (let k = 0; k < t; k += 1) this.rect(x + k, y, 1, h, c);
+  }
+
+  frame(x, y, w, h, c, t = 1) {
+    this.hline(x, y, w, c, t);
+    this.hline(x, y + h - t, w, c, t);
+    this.vline(x, y, h, c, t);
+    this.vline(x + w - t, y, h, c, t);
+  }
+
+  disc(cx, cy, r, c) {
+    for (let dy = -r; dy <= r; dy += 1) {
+      const dx = Math.floor(Math.sqrt(r * r - dy * dy));
+      this.rect(cx - dx, cy + dy, dx * 2 + 1, 1, c);
+    }
+  }
+
+  toPng() {
+    return encodePng(this.w, this.h, Buffer.from(this.px));
   }
 }
 
-// --- lead illustration: globe with leaf over a rising sun -------------
-function leadArt() {
-  return `<svg width="288" height="208" viewBox="0 0 288 208" aria-hidden="true">
-  <rect width="288" height="208" fill="#16224a"/>
-  <g fill="#ffffff">
-    <circle cx="22" cy="24" r="1.6"/><circle cx="58" cy="14" r="1.2"/><circle cx="104" cy="30" r="1.6"/>
-    <circle cx="160" cy="18" r="1.2"/><circle cx="210" cy="34" r="1.6"/><circle cx="256" cy="16" r="1.2"/>
-    <circle cx="40" cy="58" r="1.2"/><circle cx="248" cy="62" r="1.4"/><circle cx="196" cy="58" r="1"/>
-  </g>
-  <circle cx="144" cy="118" r="62" fill="#f4b400"/>
-  <circle cx="144" cy="96" r="44" fill="#2e7d5b"/>
-  <path d="M118 78c14-12 34-14 48-4-4 16-18 28-34 28-8 0-12-10-14-24Z" fill="#7fc8a9"/>
-  <path d="M150 108c10-8 26-8 36 2-6 12-20 18-32 12-4-4-4-10-4-14Z" fill="#7fc8a9"/>
-  <path d="M144 52c22 0 40 18 40 40" fill="none" stroke="#f6f1e5" stroke-width="2"/>
-  <path d="M120 62c8-4 16-6 24-6M116 84c6-2 14-3 22-2" stroke="#f6f1e5" stroke-width="1.6" fill="none"/>
-  <path d="M104 108C104 84 124 66 150 66c0 26-16 44-46 42Z" fill="#1d3557"/>
-  <path d="M104 108C116 90 130 78 146 70" stroke="#f6f1e5" stroke-width="1.6" fill="none"/>
-  <rect x="18" y="168" width="252" height="10" fill="#0d1530"/>
-  <text x="144" y="200" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" letter-spacing="2" fill="#ffffff">ANTALYA &#8226; 22 NOV 2026</text>
-</svg>`;
+// ---- 5x7 bitmap font --------------------------------------------------------
+// Each glyph is 7 rows of 5 cells; '#' is ink, '.' is blank. The poster sets
+// everything in capitals, so only capitals, digits and punctuation are needed.
+const GLYPHS = {
+  A: ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+  B: ['####.', '#...#', '#...#', '####.', '#...#', '#...#', '####.'],
+  C: ['.####', '#....', '#....', '#....', '#....', '#....', '.####'],
+  D: ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'],
+  E: ['#####', '#....', '#....', '####.', '#....', '#....', '#####'],
+  F: ['#####', '#....', '#....', '####.', '#....', '#....', '#....'],
+  G: ['.####', '#....', '#....', '#.###', '#...#', '#...#', '.###.'],
+  H: ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+  I: ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '#####'],
+  J: ['..###', '...#.', '...#.', '...#.', '...#.', '#..#.', '.##..'],
+  K: ['#...#', '#..#.', '#.#..', '##...', '#.#..', '#..#.', '#...#'],
+  L: ['#....', '#....', '#....', '#....', '#....', '#....', '#####'],
+  M: ['#...#', '##.##', '#.#.#', '#.#.#', '#...#', '#...#', '#...#'],
+  N: ['#...#', '##..#', '##..#', '#.#.#', '#..##', '#..##', '#...#'],
+  O: ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+  P: ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'],
+  Q: ['.###.', '#...#', '#...#', '#...#', '#.#.#', '#..#.', '.##.#'],
+  R: ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
+  S: ['.####', '#....', '#....', '.###.', '....#', '....#', '####.'],
+  T: ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
+  U: ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+  V: ['#...#', '#...#', '#...#', '#...#', '#...#', '.#.#.', '..#..'],
+  W: ['#...#', '#...#', '#...#', '#.#.#', '#.#.#', '##.##', '#...#'],
+  X: ['#...#', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '#...#'],
+  Y: ['#...#', '#...#', '.#.#.', '..#..', '..#..', '..#..', '..#..'],
+  Z: ['#####', '....#', '...#.', '..#..', '.#...', '#....', '#####'],
+  '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+  '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+  '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+  '3': ['####.', '....#', '....#', '.###.', '....#', '....#', '####.'],
+  '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
+  '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+  '6': ['.###.', '#....', '#....', '####.', '#...#', '#...#', '.###.'],
+  '7': ['#####', '....#', '...#.', '...#.', '..#..', '..#..', '..#..'],
+  '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+  '9': ['.###.', '#...#', '#...#', '.####', '....#', '....#', '.###.'],
+  ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....'],
+  '.': ['.....', '.....', '.....', '.....', '.....', '.##..', '.##..'],
+  ',': ['.....', '.....', '.....', '.....', '.##..', '.##..', '.#...'],
+  ':': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.....'],
+  ';': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.#...'],
+  '!': ['..#..', '..#..', '..#..', '..#..', '..#..', '.....', '..#..'],
+  '?': ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'],
+  "'": ['..#..', '..#..', '.#...', '.....', '.....', '.....', '.....'],
+  '"': ['.#.#.', '.#.#.', '.....', '.....', '.....', '.....', '.....'],
+  '-': ['.....', '.....', '.....', '.###.', '.....', '.....', '.....'],
+  '/': ['....#', '....#', '...#.', '..#..', '.#...', '#....', '#....'],
+  '(': ['...##', '..#..', '.#...', '.#...', '.#...', '..#..', '...##'],
+  ')': ['##...', '..#..', '...#.', '...#.', '...#.', '..#..', '##...'],
+  '&': ['.###.', '#...#', '#.#..', '.#...', '#.#.#', '#..#.', '.##.#'],
+  '%': ['##..#', '##.#.', '...#.', '..#..', '.#...', '#.##.', '#..##'],
+  '+': ['.....', '..#..', '..#..', '.###.', '..#..', '..#..', '.....'],
+  '=': ['.....', '.....', '.###.', '.....', '.###.', '.....', '.....'],
+  $: ['..#..', '.####', '#.#..', '.###.', '..#.#', '####.', '..#..'],
+  '•': ['.....', '.....', '.###.', '.###.', '.###.', '.....', '.....'],
+};
+
+// Letters with accents are folded to their plain form so names stay readable.
+const ACCENTS = {
+  Á: 'A', À: 'A', Â: 'A', Ä: 'A',
+  É: 'E', È: 'E', Ê: 'E', Ë: 'E',
+  Í: 'I', Ì: 'I', Î: 'I', Ï: 'I',
+  Ó: 'O', Ò: 'O', Ô: 'O', Ö: 'O',
+  Ú: 'U', Ù: 'U', Û: 'U', Ü: 'U',
+  Ñ: 'N', Ç: 'C', Ý: 'Y',
+};
+
+// Normalise copy for the bitmap font: capitals, straight quotes and dashes,
+// accented letters folded, anything unknown becomes a space.
+function clean(text) {
+  return String(text)
+    .toUpperCase()
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[—–]/g, '-')
+    .replace(/…/g, '...')
+    .split('')
+    .map((ch) => ACCENTS[ch] || ch)
+    .map((ch) => (GLYPHS[ch] ? ch : ' '))
+    .join('');
 }
 
-// --- one small story card --------------------------------------------------
-function storyCard(story) {
-  return `<div class="story">
-    <div class="story-top">
-      <span class="num">${story.n}</span>
-      <span class="kicker">${esc(story.kicker)}</span>
-      <span class="icon">${iconSvg(story.icon)}</span>
-    </div>
-    <h3>${esc(story.headline)}</h3>
-    <p>${esc(story.summary)}</p>
-  </div>`;
+function textWidth(text, scale) {
+  const s = clean(text);
+  return s.length === 0 ? 0 : s.length * 6 * scale - scale;
 }
 
-const [first, second] = [data.stories.slice(0, 2), data.stories.slice(2)];
-
-const page = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 1024px; height: 1024px; overflow: hidden; }
-  body { background: #f6f1e5; color: #111; font-family: Arial, Helvetica, sans-serif; padding: 18px 36px 14px; }
-  .mast { font-family: Georgia, 'Times New Roman', serif; font-size: 62px; font-weight: 900; letter-spacing: 3px; text-align: center; line-height: 1.05; }
-  .rule-thick { border: none; border-top: 4px solid #111; margin: 10px 0 3px; }
-  .rule-thin { border: none; border-top: 1px solid #111; margin: 0 0 8px; }
-  .daterow { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 0 8px; }
-  .date { color: #a4161a; font-weight: 800; font-size: 26px; letter-spacing: 1px; }
-  .tagline { font-size: 15px; letter-spacing: 3px; font-weight: 700; }
-  .lead { display: flex; gap: 26px; padding: 12px 0 14px; }
-  .lead-text { flex: 1; }
-  .kicker { color: #a4161a; font-size: 15px; font-weight: 800; letter-spacing: 1.5px; }
-  .lead h2 { font-family: Georgia, 'Times New Roman', serif; font-size: 41px; line-height: 1.12; margin: 6px 0 10px; }
-  .lead p { font-size: 18px; line-height: 1.42; }
-  .lead p b { font-weight: 800; }
-  .lead-art { flex: none; }
-  .row { display: flex; gap: 28px; }
-  .row.two .story { flex: 1; }
-  .row.three .story { flex: 1; }
-  .row.two { padding: 14px 0 6px; }
-  .row.three { padding: 12px 0 6px; }
-  .story-top { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-  .num { width: 30px; height: 30px; border-radius: 50%; background: #a4161a; color: #fff; font-weight: 800; font-size: 16px; display: flex; align-items: center; justify-content: center; flex: none; }
-  .story h3 { font-size: 23px; line-height: 1.18; margin: 2px 0 6px; }
-  .row.three .story h3 { font-size: 21px; }
-  .story p { font-size: 16px; line-height: 1.4; }
-  .row.three .story p { font-size: 15.5px; }
-  .icon { margin-left: auto; flex: none; }
-  .stats { display: flex; border-top: 1px solid #999; margin-top: 8px; padding-top: 8px; }
-  .stat { flex: 1; text-align: center; }
-  .stat b { display: block; color: #a4161a; font-size: 34px; }
-  .stat span { font-size: 13px; font-weight: 700; }
-  .foot { border-top: 4px solid #111; margin-top: 10px; padding-top: 8px; text-align: center; }
-  .foot b { font-size: 17px; display: block; margin-bottom: 3px; }
-  .foot span { font-size: 15px; color: #555; }
-</style></head>
-<body>
-  <div class="mast">${esc(data.masthead)}</div>
-  <hr class="rule-thick"><hr class="rule-thin">
-  <div class="daterow"><span class="date">${esc(data.date)}</span><span class="tagline">${esc(data.tagline).toUpperCase()}</span></div>
-  <hr class="rule-thin">
-  <div class="lead">
-    <div class="lead-text">
-      <div class="kicker">${esc(data.lead.kicker)}</div>
-      <h2>${esc(data.lead.headline)}</h2>
-      <p><b>${esc(data.lead.dateline)} &mdash;</b> ${esc(data.lead.summary)}</p>
-    </div>
-    <div class="lead-art">${leadArt()}</div>
-  </div>
-  <hr class="rule-thin">
-  <div class="row two">${first.map(storyCard).join("")}</div>
-  <div class="row three">${second.map(storyCard).join("")}</div>
-  <div class="stats">
-    ${data.stats.map((s) => `<div class="stat"><b>${esc(s.value)}</b><span>${esc(s.label)}</span></div>`).join("")}
-  </div>
-  <div class="foot"><b>${esc(data.footer)}</b><span>${esc(data.judge_note)}</span></div>
-</body></html>`;
-
-const workDir = mkdtempSync(join(tmpdir(), "poster-"));
-const htmlPath = join(workDir, "page.html");
-const outPath = join(ROOT, "entry.png");
-writeFileSync(htmlPath, page, "utf8");
-
-const shell = join(homedir(), ".cache", "ms-playwright", "chromium_headless_shell-1148", "chrome-linux", "headless_shell");
-execFileSync(shell, [
-  "--disable-gpu",
-  "--no-sandbox",
-  "--hide-scrollbars",
-  "--force-device-scale-factor=1",
-  "--window-size=1024,1024",
-  `--screenshot=${outPath}`,
-  `file://${htmlPath}`,
-], { stdio: "ignore" });
-
-if (!existsSync(outPath)) {
-  throw new Error("headless shell did not produce entry.png");
+function drawGlyph(page, ch, x, y, scale, color) {
+  const g = GLYPHS[ch];
+  if (!g) return;
+  for (let r = 0; r < 7; r += 1) {
+    for (let c = 0; c < 5; c += 1) {
+      if (g[r][c] === '#') page.rect(x + c * scale, y + r * scale, scale, scale, color);
+    }
+  }
 }
 
-rmSync(workDir, { recursive: true, force: true });
-const bytes = statSync(outPath).size;
-console.log(`wrote entry.png (${bytes} bytes)`);
+function drawText(page, text, x, y, scale, color) {
+  const s = clean(text);
+  let cx = x;
+  for (const ch of s) {
+    drawGlyph(page, ch, cx, y, scale, color);
+    cx += 6 * scale;
+  }
+  return cx;
+}
+
+// Greedy word wrap; a single over-long word is split mid-word.
+function wrapText(text, scale, maxWidth) {
+  const words = clean(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const trial = line ? `${line} ${w}` : w;
+    if (textWidth(trial, scale) <= maxWidth) {
+      line = trial;
+      continue;
+    }
+    if (!line) {
+      let part = '';
+      for (const ch of w) {
+        if (part && textWidth(part + ch, scale) > maxWidth) {
+          lines.push(part);
+          part = ch;
+        } else {
+          part += ch;
+        }
+      }
+      line = part;
+      continue;
+    }
+    lines.push(line);
+    line = w;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// Draw wrapped copy and report how many lines were used.
+function drawWrapped(page, text, x, y, scale, color, maxWidth, maxLines, leading) {
+  const lines = wrapText(text, scale, maxWidth).slice(0, maxLines);
+  lines.forEach((ln, i) => drawText(page, ln, x, y + i * leading, scale, color));
+  return lines.length;
+}
+
+// ---- lead art: a dusk skyline for the climate-summit lead -------------------
+// Original flat illustration: banded sunset sky, low sun, dark city skyline.
+function drawLeadArt(page, x, y, w, h) {
+  for (let row = 0; row < h; row += 1) {
+    const t = row / (h - 1);
+    const c = [
+      Math.round(SKY_TOP[0] + (SKY_LOW[0] - SKY_TOP[0]) * t),
+      Math.round(SKY_TOP[1] + (SKY_LOW[1] - SKY_TOP[1]) * t),
+      Math.round(SKY_TOP[2] + (SKY_LOW[2] - SKY_TOP[2]) * t),
+    ];
+    page.rect(x, y + row, w, 1, c);
+  }
+  const sunX = x + Math.floor(w * 0.72);
+  const sunY = y + Math.floor(h * 0.5);
+  const sunR = Math.floor(h * 0.19);
+  page.disc(sunX, sunY, sunR, SUN);
+  page.disc(sunX, sunY, Math.floor(sunR * 0.68), SUN_CORE);
+
+  const groundH = Math.floor(h * 0.16);
+  const groundTop = y + h - groundH;
+  page.rect(x, groundTop, w, groundH, GROUND);
+  page.hline(x, groundTop - 2, w, GOLD, 2);
+
+  // Uneven skyline: twelve towers of different heights on the ground line.
+  const heights = [0.34, 0.46, 0.3, 0.56, 0.4, 0.5, 0.28, 0.6, 0.36, 0.48, 0.32, 0.44];
+  const bw = Math.floor(w / heights.length);
+  heights.forEach((f, i) => {
+    const bx = x + i * bw + 2;
+    const bh = Math.floor(h * f);
+    page.rect(bx, groundTop - bh, bw - 4, bh, SKYLINE);
+  });
+  // One tall antenna tower in the middle of the skyline.
+  const towerX = x + Math.floor(w * 0.5);
+  page.rect(towerX - 2, groundTop - Math.floor(h * 0.78), 4, Math.floor(h * 0.78), SKYLINE);
+  page.disc(towerX, groundTop - Math.floor(h * 0.78) - 3, 3, RED);
+}
+
+// ---- the poster -------------------------------------------------------------
+export function renderPoster(data) {
+  const page = new Page(WIDTH, HEIGHT, PAPER);
+  const MX = 48; // side margin
+  const CW = WIDTH - MX * 2; // 928
+
+  page.frame(16, 16, WIDTH - 32, HEIGHT - 32, INK, 2);
+  page.frame(22, 22, WIDTH - 44, HEIGHT - 44, INK, 1);
+
+  let y = 34;
+
+  // Masthead.
+  const mast = clean(data.masthead || 'THE WORLD TODAY');
+  const mastScale = 9;
+  drawText(page, mast, Math.floor((WIDTH - textWidth(mast, mastScale)) / 2), y, mastScale, INK);
+  y += 63 + 10;
+
+  // Date line.
+  const dateLine = clean(data.date || '');
+  drawText(page, dateLine, Math.floor((WIDTH - textWidth(dateLine, 2)) / 2), y, 2, RED);
+  y += 14 + 10;
+
+  // Rules under the masthead.
+  page.hline(MX, y, CW, INK, 3);
+  y += 8;
+  page.hline(MX, y, CW, INK, 1);
+  y += 10;
+
+  // Lead art.
+  const artH = 205;
+  drawLeadArt(page, MX, y, CW, artH);
+  page.frame(MX, y, CW, artH, INK, 1);
+  y += artH + 12;
+
+  // Lead kicker on the left, dateline on the right.
+  drawText(page, data.lead.kicker, MX, y, 2, RED);
+  if (data.lead.dateline) {
+    const dl = clean(data.lead.dateline);
+    drawText(page, dl, WIDTH - MX - textWidth(dl, 2), y, 2, RED);
+  }
+  y += 14 + 8;
+
+  // Lead headline, then summary. The headline gets a roomier line spacing
+  // (38) so its two lines breathe; the summary runs slightly tighter (18)
+  // to keep the whole lead block the same height.
+  const hLines = drawWrapped(page, data.lead.headline, MX, y, 4, INK, CW, 3, 38);
+  y += hLines * 38 + 8;
+  const sLines = drawWrapped(page, data.lead.summary, MX, y, 2, SOFT_INK, CW, 5, 18);
+  y += sLines * 18 + 10;
+
+  page.hline(MX, y, CW, INK, 2);
+  y += 12;
+
+  // The five other stories: red number badge, headline, short summary.
+  const stories = data.stories || [];
+  const rowH = 53;
+  stories.forEach((st) => {
+    page.rect(MX, y, 30, 30, RED);
+    const num = String(st.n);
+    drawText(page, num, MX + Math.floor((30 - textWidth(num, 3)) / 2), y + 5, 3, WHITE);
+    const tx = MX + 42;
+    const tw = CW - 42;
+    const hl = drawWrapped(page, st.headline, tx, y, 2, INK, tw, 2, 19);
+    drawWrapped(page, st.summary, tx, y + hl * 19 + 3, 1, MUTED, tw, 2, 11);
+    y += rowH;
+  });
+
+  // Four stat boxes in a row.
+  const stats = data.stats || [];
+  const gap = 12;
+  const boxW = Math.floor((CW - gap * (stats.length - 1)) / Math.max(stats.length, 1));
+  const boxH = 50;
+  stats.forEach((st, i) => {
+    const bx = MX + i * (boxW + gap);
+    page.rect(bx, y, boxW, boxH, BOX_TINT);
+    page.frame(bx, y, boxW, boxH, INK, 1);
+    const val = clean(st.value);
+    drawText(page, val, bx + Math.floor((boxW - textWidth(val, 3)) / 2), y + 7, 3, RED);
+    const lab = clean(st.label);
+    drawText(page, lab, bx + Math.floor((boxW - textWidth(lab, 1)) / 2), y + 33, 1, INK);
+  });
+  y += boxH + 10;
+
+  // Sources in two columns, three per side.
+  const sources = data.sources || [];
+  drawText(page, 'SOURCES', MX, y, 1, RED);
+  y += 11;
+  const colW = Math.floor((CW - 24) / 2);
+  sources.forEach((src, i) => {
+    const col = i < 3 ? 0 : 1;
+    const row = i % 3;
+    drawText(page, src, MX + col * (colW + 24), y + row * 11, 1, MUTED);
+  });
+  y += 3 * 11 + 8;
+
+  // Footer: rule, tagline, then the footer line.
+  page.hline(MX, y, CW, INK, 1);
+  y += 8;
+  const tag = clean(data.tagline || '');
+  drawText(page, tag, Math.floor((WIDTH - textWidth(tag, 2)) / 2), y, 2, INK);
+  y += 14 + 6;
+  const foot = clean(data.footer || '');
+  drawText(page, foot, Math.floor((WIDTH - textWidth(foot, 1)) / 2), y, 1, MUTED);
+  y += 7;
+
+  if (y > HEIGHT - 24) throw new Error(`poster overflow: content ends at y=${y}`);
+  return page.toPng();
+}
+
+// ---- command line: node render.mjs writes entry.png next to this file -------
+const here = path.dirname(fileURLToPath(import.meta.url));
+const invokedAsMain =
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(here, 'render.mjs');
+
+if (invokedAsMain) {
+  const data = JSON.parse(fs.readFileSync(path.join(here, 'stories.json'), 'utf8'));
+  const png = renderPoster(data);
+  const target = path.join(here, 'entry.png');
+  fs.writeFileSync(target, png);
+  console.log(`wrote ${target} (${png.length} bytes, ${WIDTH}x${HEIGHT})`);
+}
