@@ -33,6 +33,11 @@ function iconSvg(kind) {
         `<path d="M12 2.5 19 5v6c0 5-3.2 8.6-7 9.5C8.2 19.6 5 16 5 11V5Z" fill="#1d3557"/>` +
           `<path d="M12 7v9M7.5 11.5h9" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>`
       );
+    case "flame":
+      return wrap(
+        `<path d="M12 2.5c1.5 4 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-5 .5 1.5 1.5 2.5 3 3-.5-3 0-6 0-8Z" fill="#e63946"/>` +
+          `<path d="M12 21a2.6 2.6 0 0 1-2.6-2.6c0-1.8 1.4-2.6 2.6-4.4 1.2 1.8 2.6 2.6 2.6 4.4A2.6 2.6 0 0 1 12 21Z" fill="#f4b400"/>`
+      );
     case "bolt":
       return wrap(
         `<polygon points="13,2 5.5,13.5 10.5,13.5 9,22 18.5,10 13.5,10" fill="#a4161a"/>`
@@ -48,7 +53,7 @@ function iconSvg(kind) {
   }
 }
 
-// --- lead illustration: night sky, gold star, roadblock barrier -----------
+// --- lead illustration: globe with leaf over a rising sun -------------
 function leadArt() {
   return `<svg width="288" height="208" viewBox="0 0 288 208" aria-hidden="true">
   <rect width="288" height="208" fill="#16224a"/>
@@ -57,15 +62,16 @@ function leadArt() {
     <circle cx="160" cy="18" r="1.2"/><circle cx="210" cy="34" r="1.6"/><circle cx="256" cy="16" r="1.2"/>
     <circle cx="40" cy="58" r="1.2"/><circle cx="248" cy="62" r="1.4"/><circle cx="196" cy="58" r="1"/>
   </g>
-  <polygon fill="#f4b400" points="144,26 157,66 198,67 166,91 178,131 144,107 110,131 122,91 90,67 131,66"/>
-  <circle cx="144" cy="82" r="13" fill="#16224a"/>
-  <circle cx="144" cy="82" r="13" fill="none" stroke="#ffffff" stroke-width="1.5"/>
-  <path d="M144 75v14M137 82h14" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>
-  <rect x="18" y="150" width="252" height="16" fill="#f6f1e5"/>
-  <g fill="#a4161a"><rect x="42" y="150" width="14" height="16"/><rect x="86" y="150" width="14" height="16"/><rect x="130" y="150" width="14" height="16"/><rect x="174" y="150" width="14" height="16"/><rect x="218" y="150" width="14" height="16"/></g>
-  <rect x="18" y="170" width="252" height="14" fill="#0d1530"/>
-  <g stroke="#f6f1e5" stroke-width="2"><line x1="40" y1="170" x2="40" y2="184"/><line x1="88" y1="170" x2="88" y2="184"/><line x1="136" y1="170" x2="136" y2="184"/><line x1="184" y1="170" x2="184" y2="184"/><line x1="232" y1="170" x2="232" y2="184"/></g>
-  <text x="144" y="200" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" letter-spacing="2" fill="#ffffff">SINALOA &#8226; 22 NOV 2026</text>
+  <circle cx="144" cy="118" r="62" fill="#f4b400"/>
+  <circle cx="144" cy="96" r="44" fill="#2e7d5b"/>
+  <path d="M118 78c14-12 34-14 48-4-4 16-18 28-34 28-8 0-12-10-14-24Z" fill="#7fc8a9"/>
+  <path d="M150 108c10-8 26-8 36 2-6 12-20 18-32 12-4-4-4-10-4-14Z" fill="#7fc8a9"/>
+  <path d="M144 52c22 0 40 18 40 40" fill="none" stroke="#f6f1e5" stroke-width="2"/>
+  <path d="M120 62c8-4 16-6 24-6M116 84c6-2 14-3 22-2" stroke="#f6f1e5" stroke-width="1.6" fill="none"/>
+  <path d="M104 108C104 84 124 66 150 66c0 26-16 44-46 42Z" fill="#1d3557"/>
+  <path d="M104 108C116 90 130 78 146 70" stroke="#f6f1e5" stroke-width="1.6" fill="none"/>
+  <rect x="18" y="168" width="252" height="10" fill="#0d1530"/>
+  <text x="144" y="200" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" letter-spacing="2" fill="#ffffff">ANTALYA &#8226; 22 NOV 2026</text>
 </svg>`;
 }
 
